@@ -1,0 +1,5 @@
+{
+  "name": "Vale-Transporte Route Verifier",
+  "description": "Verify bus routes and calculate transportation costs using CEP and KML files.",
+  "requestFramePermissions": ["geolocation"]
+}
