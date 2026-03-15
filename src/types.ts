@@ -18,4 +18,5 @@ export interface RouteState {
   destination: Location | null;
   selectedLines: BusLine[];
   daysWorked: number;
+  isRoundTrip: boolean;
 }

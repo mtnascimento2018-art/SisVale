@@ -3,6 +3,7 @@ import { BusLine, Location, RouteState } from "./types";
 import { fetchBusLines, geocodeCEP } from "./services/api";
 import Map from "./components/Map";
 import Admin from "./components/Admin";
+import L from "leaflet";
 import { MapPin, Bus, Calculator, Settings, Search, ChevronRight, Info, FileText, Download } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import jsPDF from "jspdf";
@@ -27,6 +28,7 @@ export default function App() {
     destination: null,
     selectedLines: [],
     daysWorked: 22,
+    isRoundTrip: true,
   });
 
   useEffect(() => {
@@ -97,7 +99,7 @@ export default function App() {
   }, [userSearchTerm]);
 
   const valorIda = (route?.selectedLines || []).reduce((sum, l) => sum + (l?.price || 0), 0);
-  const valorIdaVolta = valorIda * 2;
+  const valorIdaVolta = route.isRoundTrip ? valorIda * 2 : valorIda;
   const custoMensal = valorIdaVolta * (route?.daysWorked || 0);
 
   const generatePDF = async () => {
@@ -107,114 +109,171 @@ export default function App() {
     try {
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 15;
+      const contentWidth = pageWidth - (margin * 2);
       
-      // Header
-      doc.setFillColor(79, 70, 229); // Indigo 600
-      doc.rect(0, 0, pageWidth, 40, 'F');
+      // Helper for distance/duration
+      const getWalkingMetrics = (start: [number, number], end: [number, number]) => {
+        const dist = L.latLng(start).distanceTo(L.latLng(end));
+        const dur = dist / 1.388; // 5km/h
+        return { dist, dur };
+      };
+
+      const formatDist = (m: number) => m < 1000 ? `${Math.round(m)}m` : `${(m / 1000).toFixed(1)}km`;
+      const formatDur = (s: number) => {
+        const mins = Math.round(s / 60);
+        return mins < 1 ? "< 1 min" : `${mins} min`;
+      };
+
+      // Calculate walking metrics
+      let originWalking = { dist: 0, dur: 0 };
+      let destWalking = { dist: 0, dur: 0 };
+      
+      if (route.selectedLines.length > 0) {
+        const line = route.selectedLines[0];
+        const coords = line.coordinates || [];
+        const findClosest = (point: [number, number], polyline: [number, number][]) => {
+          let minD = Infinity;
+          let closest: [number, number] = polyline[0];
+          for (let i = 0; i < polyline.length - 1; i++) {
+            const p1 = polyline[i];
+            const p2 = polyline[i + 1];
+            const dx = p2[1] - p1[1];
+            const dy = p2[0] - p1[0];
+            if (dx === 0 && dy === 0) continue;
+            let t = ((point[1] - p1[1]) * dx + (point[0] - p1[0]) * dy) / (dx * dx + dy * dy);
+            t = Math.max(0, Math.min(1, t));
+            const proj: [number, number] = [p1[0] + t * dy, p1[1] + t * dx];
+            const d = L.latLng(point).distanceTo(L.latLng(proj));
+            if (d < minD) { minD = d; closest = proj; }
+          }
+          return { point: closest, distance: minD };
+        };
+        const closestOrigin = findClosest([route.origin.lat, route.origin.lng], coords);
+        const closestDest = findClosest([route.destination.lat, route.destination.lng], coords);
+        originWalking = getWalkingMetrics([route.origin.lat, route.origin.lng], closestOrigin.point);
+        destWalking = getWalkingMetrics([route.destination.lat, route.destination.lng], closestDest.point);
+      }
+
+      // Header - Compact
+      doc.setFillColor(79, 70, 229);
+      doc.rect(0, 0, pageWidth, 25, 'F');
       doc.setTextColor(255, 255, 255);
-      doc.setFontSize(24);
+      doc.setFontSize(18);
       doc.setFont("helvetica", "bold");
-      doc.text("Relatório de Trajeto Vale-Rota", 20, 25);
-      
-      doc.setFontSize(10);
+      doc.text("Relatório Vale-Rota", margin, 15);
+      doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text(`Gerado em: ${new Date().toLocaleString('pt-BR')}`, 20, 33);
+      doc.text(`Gerado em: ${new Date().toLocaleString('pt-BR')}`, margin, 20);
       
-      // Section: Addresses
-      doc.setTextColor(30, 41, 59); // Slate 800
-      doc.setFontSize(14);
+      let y = 35;
+
+      // Two Column Layout for Info
+      doc.setTextColor(30, 41, 59);
+      doc.setFontSize(11);
       doc.setFont("helvetica", "bold");
-      doc.text("Informações do Percurso", 20, 55);
+      doc.text("Informações do Percurso", margin, y);
+      doc.text("Métricas de Caminhada", pageWidth / 2 + 5, y);
       
-      doc.setFontSize(10);
+      y += 6;
+      doc.setFontSize(8);
       doc.setFont("helvetica", "bold");
-      doc.text("Origem:", 20, 65);
+      doc.text("Origem:", margin, y);
       doc.setFont("helvetica", "normal");
-      doc.text(route.origin.address, 40, 65, { maxWidth: 150 });
+      doc.text(`${cepOrigem} - ${route.origin.address}`, margin + 15, y, { maxWidth: pageWidth / 2 - 25 });
       
       doc.setFont("helvetica", "bold");
-      doc.text("Destino:", 20, 75);
+      doc.text("Início:", pageWidth / 2 + 5, y);
       doc.setFont("helvetica", "normal");
-      doc.text(route.destination.address, 40, 75, { maxWidth: 150 });
-      
-      // Section: Selected Lines
-      doc.setFontSize(14);
+      doc.text(`${formatDist(originWalking.dist)} (~${formatDur(originWalking.dur)})`, pageWidth / 2 + 20, y);
+
+      y += 10;
       doc.setFont("helvetica", "bold");
-      doc.text("Linhas Selecionadas", 20, 95);
+      doc.text("Destino:", margin, y);
+      doc.setFont("helvetica", "normal");
+      doc.text(`${cepDestino} - ${route.destination.address}`, margin + 15, y, { maxWidth: pageWidth / 2 - 25 });
       
-      let yPos = 105;
+      doc.setFont("helvetica", "bold");
+      doc.text("Final:", pageWidth / 2 + 5, y);
+      doc.setFont("helvetica", "normal");
+      doc.text(`${formatDist(destWalking.dist)} (~${formatDur(destWalking.dur)})`, pageWidth / 2 + 20, y);
+
+      y += 12;
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, y - 5, pageWidth - margin, y - 5);
+
+      // Lines and Financial Summary
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "bold");
+      doc.text(`Linhas Selecionadas (${route.selectedLines.length})`, margin, y);
+      doc.text("Resumo Financeiro", pageWidth / 2 + 5, y);
+
+      y += 6;
+      let lineY = y;
       route.selectedLines.forEach((line, index) => {
-        doc.setFontSize(10);
-        doc.setFont("helvetica", "bold");
-        doc.text(`${index + 1}. ${line.name || line.routeId}`, 25, yPos);
+        doc.setFontSize(8);
         doc.setFont("helvetica", "normal");
-        doc.text(`Tarifa: R$ ${line.price.toFixed(2)}`, 150, yPos);
-        yPos += 8;
+        doc.text(`${index + 1}. ${line.name || line.routeId}`, margin + 2, lineY);
+        doc.text(`R$ ${line.price.toFixed(2)}`, margin + 65, lineY);
+        lineY += 5;
       });
-      
-      // Section: Financial Summary
-      yPos += 10;
-      doc.setDrawColor(226, 232, 240); // Slate 200
-      doc.line(20, yPos - 5, pageWidth - 20, yPos - 5);
-      
-      doc.setFontSize(14);
-      doc.setFont("helvetica", "bold");
-      doc.text("Resumo Financeiro", 20, yPos);
-      
-      yPos += 10;
-      doc.setFontSize(10);
+
+      doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Custo Total Ida:", 20, yPos);
+      doc.text("Custo Unitário (Ida):", pageWidth / 2 + 5, y);
       doc.setFont("helvetica", "bold");
-      doc.text(`R$ ${valorIda.toFixed(2)}`, 150, yPos);
+      doc.text(`R$ ${valorIda.toFixed(2)}`, pageWidth - margin - 20, y, { align: 'right' });
       
-      yPos += 8;
+      y += 5;
       doc.setFont("helvetica", "normal");
-      doc.text("Custo Total Ida e Volta:", 20, yPos);
+      doc.text(route.isRoundTrip ? "Custo Ida e Volta:" : "Custo (Apenas Ida):", pageWidth / 2 + 5, y);
       doc.setFont("helvetica", "bold");
-      doc.text(`R$ ${valorIdaVolta.toFixed(2)}`, 150, yPos);
+      doc.text(`R$ ${valorIdaVolta.toFixed(2)}`, pageWidth - margin - 20, y, { align: 'right' });
       
-      yPos += 8;
+      y += 5;
       doc.setFont("helvetica", "normal");
-      doc.text(`Custo Mensal (${route.daysWorked} dias):`, 20, yPos);
+      doc.text(`Custo Mensal (${route.daysWorked} dias):`, pageWidth / 2 + 5, y);
       doc.setFont("helvetica", "bold");
       doc.setTextColor(79, 70, 229);
-      doc.text(`R$ ${custoMensal.toFixed(2)}`, 150, yPos);
-      
-      // Section: Map Screenshot
+      doc.text(`R$ ${custoMensal.toFixed(2)}`, pageWidth - margin - 20, y, { align: 'right' });
+
+      y = Math.max(lineY, y + 10) + 5;
+
+      // Map Screenshot - Compact
       if (mapRef.current) {
-        yPos += 20;
         doc.setTextColor(30, 41, 59);
-        doc.setFontSize(14);
+        doc.setFontSize(11);
         doc.setFont("helvetica", "bold");
-        doc.text("Mapa do Trajeto", 20, yPos);
+        doc.text("Mapa do Trajeto", margin, y);
         
         const imgData = await htmlToImage.toJpeg(mapRef.current, {
           quality: 0.8,
-          pixelRatio: 2,
-          backgroundColor: '#f1f5f9', // Slate 100
+          pixelRatio: 1.5,
+          backgroundColor: '#f1f5f9',
         });
         
-        // Calculate image dimensions to fit page
         const imgProps = doc.getImageProperties(imgData);
-        const imgWidth = pageWidth - 40;
+        const imgWidth = contentWidth;
         const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
         
-        // Check if map fits on current page
-        if (yPos + imgHeight + 20 > doc.internal.pageSize.getHeight()) {
-          doc.addPage();
-          yPos = 20;
-        } else {
-          yPos += 10;
+        // Ensure it fits on one page by scaling down if necessary
+        const maxMapHeight = pageHeight - y - 15;
+        let finalWidth = imgWidth;
+        let finalHeight = imgHeight;
+        
+        if (imgHeight > maxMapHeight) {
+          finalHeight = maxMapHeight;
+          finalWidth = (imgProps.width * finalHeight) / imgProps.height;
         }
         
-        doc.addImage(imgData, 'JPEG', 20, yPos, imgWidth, imgHeight);
+        doc.addImage(imgData, 'JPEG', (pageWidth - finalWidth) / 2, y + 5, finalWidth, finalHeight);
       }
       
       doc.save(`relatorio-vale-rota-${new Date().getTime()}.pdf`);
     } catch (err) {
       console.error("Erro ao gerar PDF:", err);
-      alert("Erro ao gerar o relatório PDF. Certifique-se de que o mapa carregou completamente.");
+      alert("Erro ao gerar o relatório PDF.");
     } finally {
       setIsGeneratingPDF(false);
     }
@@ -317,6 +376,17 @@ export default function App() {
                       })}
                       className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all text-sm"
                     />
+                  </div>
+
+                  <div className="flex items-center gap-2 mb-2 md:mb-0 h-10 px-4 bg-slate-50 border border-slate-200 rounded-xl">
+                    <input
+                      type="checkbox"
+                      id="roundTrip"
+                      checked={route.isRoundTrip}
+                      onChange={(e) => setRoute(prev => ({ ...prev, isRoundTrip: e.target.checked }))}
+                      className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500"
+                    />
+                    <label htmlFor="roundTrip" className="text-xs font-bold text-slate-600 cursor-pointer select-none">Ida e Volta</label>
                   </div>
 
                   <button
@@ -488,7 +558,7 @@ export default function App() {
                             <div className="text-lg font-bold text-slate-800">R$ {valorIda.toFixed(2)}</div>
                           </div>
                           <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                            <div className="text-[10px] font-bold text-slate-400 uppercase">Ida e Volta</div>
+                            <div className="text-[10px] font-bold text-slate-400 uppercase">{route.isRoundTrip ? "Ida e Volta" : "Total (Apenas Ida)"}</div>
                             <div className="text-lg font-bold text-slate-800">R$ {valorIdaVolta.toFixed(2)}</div>
                           </div>
                         </div>
