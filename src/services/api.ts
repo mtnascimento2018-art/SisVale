@@ -1,7 +1,7 @@
 import { BusLine, Location } from "../types";
 
-export const fetchBusLines = async (): Promise<BusLine[]> => {
-  const response = await fetch("/api/lines");
+export const fetchBusLines = async (activeOnly = false): Promise<BusLine[]> => {
+  const response = await fetch(`/api/lines${activeOnly ? "?active=true" : ""}`);
   if (!response.ok) throw new Error("Failed to fetch bus lines");
   return response.json();
 };
@@ -16,8 +16,18 @@ export const saveBusLine = async (line: BusLine): Promise<BusLine> => {
   return response.json();
 };
 
-export const deleteBusLine = async (name: string): Promise<void> => {
-  const response = await fetch(`/api/lines/${encodeURIComponent(name)}`, {
+export const saveBulkBusLines = async (lines: Partial<BusLine>[]): Promise<{ count: number }> => {
+  const response = await fetch("/api/lines/bulk", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(lines),
+  });
+  if (!response.ok) throw new Error("Failed to save bulk bus lines");
+  return response.json();
+};
+
+export const deleteBusLine = async (routeId: string): Promise<void> => {
+  const response = await fetch(`/api/lines/${encodeURIComponent(routeId)}`, {
     method: "DELETE",
   });
   if (!response.ok) throw new Error("Failed to delete bus line");

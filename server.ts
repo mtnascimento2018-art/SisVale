@@ -22,13 +22,18 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   // API Routes
   app.get("/api/lines", (req, res) => {
     try {
+      const activeOnly = req.query.active === "true";
       const data = fs.readFileSync(DATA_FILE, "utf-8");
-      res.json(JSON.parse(data));
+      let lines = JSON.parse(data);
+      if (activeOnly) {
+        lines = lines.filter((l: any) => l.isActive);
+      }
+      res.json(lines);
     } catch (error) {
       res.status(500).json({ error: "Failed to read data" });
     }
@@ -37,9 +42,19 @@ async function startServer() {
   app.post("/api/lines", (req, res) => {
     try {
       const newLine = req.body;
+      if (!newLine.routeId) return res.status(400).json({ error: "routeId is required" });
+      
       const data = fs.readFileSync(DATA_FILE, "utf-8");
-      const lines = JSON.parse(data);
-      lines.push(newLine);
+      let lines = JSON.parse(data);
+      
+      // Check if exists, update if so, else push
+      const index = lines.findIndex((l: any) => l.routeId === newLine.routeId);
+      if (index !== -1) {
+        lines[index] = { ...lines[index], ...newLine };
+      } else {
+        lines.push(newLine);
+      }
+      
       fs.writeFileSync(DATA_FILE, JSON.stringify(lines, null, 2));
       res.status(201).json(newLine);
     } catch (error) {
@@ -47,12 +62,41 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/lines/:name", (req, res) => {
+  app.post("/api/lines/bulk", (req, res) => {
     try {
-      const name = req.params.name;
+      const newLines = req.body;
+      if (!Array.isArray(newLines)) return res.status(400).json({ error: "Expected array" });
+      
       const data = fs.readFileSync(DATA_FILE, "utf-8");
       let lines = JSON.parse(data);
-      lines = lines.filter((l: any) => l.name !== name);
+      
+      newLines.forEach(newLine => {
+        const index = lines.findIndex((l: any) => l.routeId === newLine.routeId);
+        if (index !== -1) {
+          // Update existing, but keep price and isActive if not provided in bulk
+          lines[index] = { ...lines[index], ...newLine };
+        } else {
+          lines.push({
+            price: 4.30,
+            isActive: false,
+            ...newLine
+          });
+        }
+      });
+      
+      fs.writeFileSync(DATA_FILE, JSON.stringify(lines, null, 2));
+      res.status(201).json({ count: newLines.length });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save bulk data" });
+    }
+  });
+
+  app.delete("/api/lines/:routeId", (req, res) => {
+    try {
+      const routeId = req.params.routeId;
+      const data = fs.readFileSync(DATA_FILE, "utf-8");
+      let lines = JSON.parse(data);
+      lines = lines.filter((l: any) => l.routeId !== routeId);
       fs.writeFileSync(DATA_FILE, JSON.stringify(lines, null, 2));
       res.json({ success: true });
     } catch (error) {

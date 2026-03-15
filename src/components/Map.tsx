@@ -54,18 +54,40 @@ const walkingIcon = new L.DivIcon({
   iconAnchor: [10, 10]
 });
 
-// Helper to find closest point on a polyline
+// Helper to find closest point on a polyline (considering segments for better accuracy)
 function findClosestPoint(point: [number, number], polyline: [number, number][]): { point: [number, number], distance: number } {
   let minDistance = Infinity;
   let closest: [number, number] = polyline[0];
 
-  polyline.forEach(p => {
-    const d = L.latLng(point).distanceTo(L.latLng(p));
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const p1 = polyline[i];
+    const p2 = polyline[i + 1];
+    
+    // Vector p1 -> p2
+    const dx = p2[1] - p1[1];
+    const dy = p2[0] - p1[0];
+    
+    if (dx === 0 && dy === 0) {
+      const d = L.latLng(point).distanceTo(L.latLng(p1));
+      if (d < minDistance) {
+        minDistance = d;
+        closest = p1;
+      }
+      continue;
+    }
+    
+    // Parameter t for projection of point onto segment p1-p2
+    let t = ((point[1] - p1[1]) * dx + (point[0] - p1[0]) * dy) / (dx * dx + dy * dy);
+    t = Math.max(0, Math.min(1, t));
+    
+    const proj: [number, number] = [p1[0] + t * dy, p1[1] + t * dx];
+    const d = L.latLng(point).distanceTo(L.latLng(proj));
+    
     if (d < minDistance) {
       minDistance = d;
-      closest = p;
+      closest = proj;
     }
-  });
+  }
 
   return { point: closest, distance: minDistance };
 }
@@ -88,19 +110,35 @@ function formatDuration(seconds: number) {
 
 function WalkingPath({ start, end, label }: { start: [number, number], end: [number, number], label: string }) {
   const [route, setRoute] = useState<RouteInfo | null>(null);
+  const directDistance = L.latLng(start).distanceTo(L.latLng(end));
 
   useEffect(() => {
     let isMounted = true;
+    
+    // If distance is relatively short (< 400m), use a straight line.
+    // This avoids OSRM making huge detours for simple street crossings or 
+    // missing pedestrian bridges/passarelas.
+    if (directDistance < 400) {
+      setRoute(null);
+      return;
+    }
+
     getWalkingRoute(start, end).then(res => {
       if (isMounted && res) {
-        setRoute(res);
+        // Even for longer distances, if the OSRM route is significantly longer 
+        // than the direct path (e.g., 2.5x), it's likely a routing artifact.
+        if (res.distance > directDistance * 2.5) {
+          setRoute(null);
+        } else {
+          setRoute(res);
+        }
       }
     });
     return () => { isMounted = false; };
-  }, [start[0], start[1], end[0], end[1]]);
+  }, [start[0], start[1], end[0], end[1], directDistance]);
 
   const positions = route ? route.coordinates : [start, end];
-  const distance = route ? route.distance : L.latLng(start).distanceTo(L.latLng(end));
+  const distance = route ? route.distance : directDistance;
   
   // OSRM foot duration can sometimes be unreliable or missing. 
   // Calculate duration manually based on distance (average walking speed: 5 km/h = ~1.388 m/s)
@@ -110,7 +148,13 @@ function WalkingPath({ start, end, label }: { start: [number, number], end: [num
     <>
       <Polyline
         positions={positions}
-        pathOptions={{ color: '#475569', weight: 4, dashArray: '6, 8', opacity: 0.8, lineJoin: 'round' }}
+        pathOptions={{ 
+          color: '#475569', 
+          weight: 4, 
+          dashArray: route ? '6, 8' : '2, 6', // Different dash for straight line fallback
+          opacity: 0.8, 
+          lineJoin: 'round' 
+        }}
       />
       <Marker position={end} icon={walkingIcon}>
         <Popup className="custom-popup">
@@ -119,6 +163,9 @@ function WalkingPath({ start, end, label }: { start: [number, number], end: [num
             <span className="text-indigo-600 font-bold text-[11px]">{formatDistance(distance)}</span>
             <span className="text-slate-400 mx-1 text-[9px]">•</span>
             <span className="text-emerald-600 font-bold text-[11px]">{formatDuration(duration)}</span>
+            {!route && directDistance > 50 && (
+              <div className="text-[8px] text-slate-400 mt-1 italic">(Caminho direto)</div>
+            )}
           </div>
         </Popup>
       </Marker>
@@ -278,13 +325,13 @@ export default function Map({ origin, destination, selectedLines }: MapProps) {
           const walkingDest = destination ? findClosestPoint([destination.lat, destination.lng], coords) : null;
 
           return (
-            <React.Fragment key={`${line?.name || idx}-${idx}`}>
+            <React.Fragment key={`${line?.routeId || idx}-${idx}`}>
               {/* Walking Path from Origin (Only for the closest selected line) */}
               {idx === closestLineToOriginIdx && origin && walkingOrigin && (
                 <WalkingPath 
                   start={[origin.lat, origin.lng]} 
                   end={walkingOrigin.point} 
-                  label={`Caminhada até ${line.name}`} 
+                  label={`Caminhada até ${line.name || line.routeId}`} 
                 />
               )}
 
@@ -293,7 +340,7 @@ export default function Map({ origin, destination, selectedLines }: MapProps) {
                 <WalkingPath 
                   start={[destination.lat, destination.lng]} 
                   end={walkingDest.point} 
-                  label={`Caminhada do ${line.name}`} 
+                  label={`Caminhada do ${line.name || line.routeId}`} 
                 />
               )}
 
@@ -301,21 +348,21 @@ export default function Map({ origin, destination, selectedLines }: MapProps) {
               <Marker position={start} icon={startIcon}>
                 <Popup>
                   <div className="p-1">
-                    <strong className="text-indigo-600">Início: {line.name}</strong>
+                    <strong className="text-indigo-600">Início: {line.name || line.routeId}</strong>
                   </div>
                 </Popup>
               </Marker>
               <Marker position={end} icon={endIcon}>
                 <Popup>
                   <div className="p-1">
-                    <strong className="text-red-600">Final: {line.name}</strong>
+                    <strong className="text-red-600">Final: {line.name || line.routeId}</strong>
                   </div>
                 </Popup>
               </Marker>
 
               {/* Shadow/Border Line */}
               <GeoJSON
-                key={`geojson-shadow-${line?.name || idx}-${idx}-${coords.length}`}
+                key={`geojson-shadow-${line?.routeId || idx}-${idx}-${coords.length}`}
                 data={{
                   type: "Feature",
                   geometry: {
@@ -334,11 +381,11 @@ export default function Map({ origin, destination, selectedLines }: MapProps) {
 
               {/* GeoJSON Route Rendering */}
               <GeoJSON
-                key={`geojson-${line?.name || idx}-${idx}-${coords.length}`}
+                key={`geojson-${line?.routeId || idx}-${idx}-${coords.length}`}
                 data={{
                   type: "Feature",
                   properties: {
-                    name: line.name,
+                    name: line.name || line.routeId,
                     price: line.price,
                     color: lineColor
                   },

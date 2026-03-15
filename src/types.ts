@@ -1,7 +1,10 @@
 export interface BusLine {
+  id?: string;
+  routeId: string;
   name: string;
   price: number;
   coordinates: [number, number][];
+  isActive: boolean;
 }
 
 export interface Location {

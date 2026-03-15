@@ -1,10 +1,12 @@
-import React, { useState, useEffect, memo } from "react";
+import React, { useState, useEffect, memo, useRef } from "react";
 import { BusLine, Location, RouteState } from "./types";
 import { fetchBusLines, geocodeCEP } from "./services/api";
 import Map from "./components/Map";
 import Admin from "./components/Admin";
-import { MapPin, Bus, Calculator, Settings, Search, ChevronRight, Info } from "lucide-react";
+import { MapPin, Bus, Calculator, Settings, Search, ChevronRight, Info, FileText, Download } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import jsPDF from "jspdf";
+import * as htmlToImage from "html-to-image";
 
 const MemoizedMap = memo(Map);
 
@@ -14,7 +16,12 @@ export default function App() {
   const [cepOrigem, setCepOrigem] = useState("");
   const [cepDestino, setCepDestino] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [userSearchTerm, setUserSearchTerm] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 5;
+  const mapRef = useRef<HTMLDivElement>(null);
   const [route, setRoute] = useState<RouteState>({
     origin: null,
     destination: null,
@@ -23,12 +30,14 @@ export default function App() {
   });
 
   useEffect(() => {
-    loadLines();
-  }, []);
+    if (activeTab === "user") {
+      loadLines();
+    }
+  }, [activeTab]);
 
   const loadLines = async () => {
     try {
-      const data = await fetchBusLines();
+      const data = await fetchBusLines(true);
       setBusLines(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error(error);
@@ -63,18 +72,153 @@ export default function App() {
     if (!line) return;
     setRoute((prev) => {
       if (!prev || !prev.selectedLines) return prev;
-      const isSelected = prev.selectedLines.some((l) => l?.name === line?.name);
+      const isSelected = prev.selectedLines.some((l) => l?.routeId === line?.routeId);
       if (isSelected) {
-        return { ...prev, selectedLines: prev.selectedLines.filter((l) => l?.name !== line?.name) };
+        return { ...prev, selectedLines: prev.selectedLines.filter((l) => l?.routeId !== line?.routeId) };
       } else {
         return { ...prev, selectedLines: [...prev.selectedLines, line] };
       }
     });
   };
 
+  const filteredLines = busLines.filter(line => 
+    line.name?.toLowerCase().includes(userSearchTerm.toLowerCase()) ||
+    line.routeId?.toLowerCase().includes(userSearchTerm.toLowerCase())
+  );
+
+  const totalPages = Math.ceil(filteredLines.length / itemsPerPage);
+  const paginatedLines = filteredLines.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  );
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [userSearchTerm]);
+
   const valorIda = (route?.selectedLines || []).reduce((sum, l) => sum + (l?.price || 0), 0);
   const valorIdaVolta = valorIda * 2;
   const custoMensal = valorIdaVolta * (route?.daysWorked || 0);
+
+  const generatePDF = async () => {
+    if (!route.origin || !route.destination) return;
+    
+    setIsGeneratingPDF(true);
+    try {
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      
+      // Header
+      doc.setFillColor(79, 70, 229); // Indigo 600
+      doc.rect(0, 0, pageWidth, 40, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(24);
+      doc.setFont("helvetica", "bold");
+      doc.text("Relatório de Trajeto Vale-Rota", 20, 25);
+      
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.text(`Gerado em: ${new Date().toLocaleString('pt-BR')}`, 20, 33);
+      
+      // Section: Addresses
+      doc.setTextColor(30, 41, 59); // Slate 800
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Informações do Percurso", 20, 55);
+      
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "bold");
+      doc.text("Origem:", 20, 65);
+      doc.setFont("helvetica", "normal");
+      doc.text(route.origin.address, 40, 65, { maxWidth: 150 });
+      
+      doc.setFont("helvetica", "bold");
+      doc.text("Destino:", 20, 75);
+      doc.setFont("helvetica", "normal");
+      doc.text(route.destination.address, 40, 75, { maxWidth: 150 });
+      
+      // Section: Selected Lines
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Linhas Selecionadas", 20, 95);
+      
+      let yPos = 105;
+      route.selectedLines.forEach((line, index) => {
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "bold");
+        doc.text(`${index + 1}. ${line.name || line.routeId}`, 25, yPos);
+        doc.setFont("helvetica", "normal");
+        doc.text(`Tarifa: R$ ${line.price.toFixed(2)}`, 150, yPos);
+        yPos += 8;
+      });
+      
+      // Section: Financial Summary
+      yPos += 10;
+      doc.setDrawColor(226, 232, 240); // Slate 200
+      doc.line(20, yPos - 5, pageWidth - 20, yPos - 5);
+      
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text("Resumo Financeiro", 20, yPos);
+      
+      yPos += 10;
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.text("Custo Total Ida:", 20, yPos);
+      doc.setFont("helvetica", "bold");
+      doc.text(`R$ ${valorIda.toFixed(2)}`, 150, yPos);
+      
+      yPos += 8;
+      doc.setFont("helvetica", "normal");
+      doc.text("Custo Total Ida e Volta:", 20, yPos);
+      doc.setFont("helvetica", "bold");
+      doc.text(`R$ ${valorIdaVolta.toFixed(2)}`, 150, yPos);
+      
+      yPos += 8;
+      doc.setFont("helvetica", "normal");
+      doc.text(`Custo Mensal (${route.daysWorked} dias):`, 20, yPos);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(79, 70, 229);
+      doc.text(`R$ ${custoMensal.toFixed(2)}`, 150, yPos);
+      
+      // Section: Map Screenshot
+      if (mapRef.current) {
+        yPos += 20;
+        doc.setTextColor(30, 41, 59);
+        doc.setFontSize(14);
+        doc.setFont("helvetica", "bold");
+        doc.text("Mapa do Trajeto", 20, yPos);
+        
+        const imgData = await htmlToImage.toJpeg(mapRef.current, {
+          quality: 0.8,
+          pixelRatio: 2,
+          backgroundColor: '#f1f5f9', // Slate 100
+        });
+        
+        // Calculate image dimensions to fit page
+        const imgProps = doc.getImageProperties(imgData);
+        const imgWidth = pageWidth - 40;
+        const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
+        
+        // Check if map fits on current page
+        if (yPos + imgHeight + 20 > doc.internal.pageSize.getHeight()) {
+          doc.addPage();
+          yPos = 20;
+        } else {
+          yPos += 10;
+        }
+        
+        doc.addImage(imgData, 'JPEG', 20, yPos, imgWidth, imgHeight);
+      }
+      
+      doc.save(`relatorio-vale-rota-${new Date().getTime()}.pdf`);
+    } catch (err) {
+      console.error("Erro ao gerar PDF:", err);
+      alert("Erro ao gerar o relatório PDF. Certifique-se de que o mapa carregou completamente.");
+    } finally {
+      setIsGeneratingPDF(false);
+    }
+  };
 
   return (
     <div className="flex flex-col md:h-screen min-h-screen w-full bg-slate-50 font-sans text-slate-900 md:overflow-hidden">
@@ -237,56 +381,95 @@ export default function App() {
 
                     {/* Bus Line Selection */}
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Linhas Disponíveis</h3>
-                        <div className="flex items-center gap-2">
-                          {(route?.selectedLines || []).length > 0 && (
-                            <button 
-                              onClick={() => setRoute(prev => ({ ...prev, selectedLines: [] }))}
-                              className="text-[10px] font-bold text-red-500 hover:text-red-700 uppercase tracking-tight"
-                            >
-                              Limpar
-                            </button>
-                          )}
-                          <span className="text-[10px] font-bold bg-slate-100 px-2 py-0.5 rounded-full text-slate-500">
-                            {(route?.selectedLines || []).length} / {busLines.length}
-                          </span>
+                      <div className="flex flex-col gap-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Linhas Disponíveis</h3>
+                          <div className="flex items-center gap-2">
+                            {(route?.selectedLines || []).length > 0 && (
+                              <button 
+                                onClick={() => setRoute(prev => ({ ...prev, selectedLines: [] }))}
+                                className="text-[10px] font-bold text-red-500 hover:text-red-700 uppercase tracking-tight"
+                              >
+                                Limpar
+                              </button>
+                            )}
+                            <span className="text-[10px] font-bold bg-slate-100 px-2 py-0.5 rounded-full text-slate-500">
+                              {(route?.selectedLines || []).length} selecionadas
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Search Input */}
+                        <div className="relative">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="Filtrar por nome ou ID..."
+                            value={userSearchTerm}
+                            onChange={(e) => setUserSearchTerm(e.target.value)}
+                            className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                          />
                         </div>
                       </div>
                       
                       <div className="space-y-2">
-                        {busLines.length === 0 ? (
+                        {filteredLines.length === 0 ? (
                           <div className="text-center py-8 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
                             <Bus className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                            <p className="text-xs text-slate-400">Nenhuma linha cadastrada.</p>
+                            <p className="text-xs text-slate-400">Nenhuma linha encontrada.</p>
                           </div>
                         ) : (
-                          busLines.map((line, idx) => (
-                            <button
-                              key={line?.name || `line-${idx}`}
-                              onClick={() => line && toggleLine(line)}
-                              className={`w-full text-left p-3 rounded-xl border transition-all flex items-center justify-between group ${
-                                (route?.selectedLines || []).some(l => l?.name === line?.name)
-                                  ? "bg-indigo-50 border-indigo-200 ring-1 ring-indigo-200"
-                                  : "bg-white border-slate-200 hover:border-indigo-200"
-                              }`}
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className={`p-2.5 rounded-lg transition-colors ${
-                                  (route?.selectedLines || []).some(l => l?.name === line?.name) ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-400 group-hover:bg-indigo-100 group-hover:text-indigo-600"
-                                }`}>
-                                  <Bus className="w-4 h-4" />
+                          <>
+                            {paginatedLines.map((line, idx) => (
+                              <button
+                                key={line?.routeId || `line-${idx}`}
+                                onClick={() => line && toggleLine(line)}
+                                className={`w-full text-left p-3 rounded-xl border transition-all flex items-center justify-between group ${
+                                  (route?.selectedLines || []).some(l => l?.routeId === line?.routeId)
+                                    ? "bg-indigo-50 border-indigo-200 ring-1 ring-indigo-200"
+                                    : "bg-white border-slate-200 hover:border-indigo-200"
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className={`p-2.5 rounded-lg transition-colors ${
+                                    (route?.selectedLines || []).some(l => l?.routeId === line?.routeId) ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-400 group-hover:bg-indigo-100 group-hover:text-indigo-600"
+                                  }`}>
+                                    <Bus className="w-4 h-4" />
+                                  </div>
+                                  <div>
+                                    <div className="text-sm font-bold text-slate-800 truncate max-w-[180px]">{line?.name || line?.routeId || "Sem nome"}</div>
+                                    <div className="text-xs font-medium text-slate-500">R$ {(line?.price || 0).toFixed(2)}</div>
+                                  </div>
                                 </div>
-                                <div>
-                                  <div className="text-sm font-bold text-slate-800">{line?.name || "Sem nome"}</div>
-                                  <div className="text-xs font-medium text-slate-500">R$ {(line?.price || 0).toFixed(2)}</div>
-                                </div>
+                                {(route?.selectedLines || []).some(l => l?.routeId === line?.routeId) && (
+                                  <div className="w-2.5 h-2.5 rounded-full bg-indigo-600 shadow-sm shadow-indigo-200" />
+                                )}
+                              </button>
+                            ))}
+
+                            {/* Pagination Controls */}
+                            {totalPages > 1 && (
+                              <div className="flex items-center justify-between pt-2 px-1">
+                                <button
+                                  disabled={currentPage === 1}
+                                  onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                  className="p-1.5 rounded-lg border border-slate-200 disabled:opacity-30 hover:bg-slate-50 transition-colors"
+                                >
+                                  <ChevronRight className="w-4 h-4 rotate-180" />
+                                </button>
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                  Página {currentPage} de {totalPages}
+                                </span>
+                                <button
+                                  disabled={currentPage === totalPages}
+                                  onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                                  className="p-1.5 rounded-lg border border-slate-200 disabled:opacity-30 hover:bg-slate-50 transition-colors"
+                                >
+                                  <ChevronRight className="w-4 h-4" />
+                                </button>
                               </div>
-                              {(route?.selectedLines || []).some(l => l?.name === line?.name) && (
-                                <div className="w-2.5 h-2.5 rounded-full bg-indigo-600 shadow-sm shadow-indigo-200" />
-                              )}
-                            </button>
-                          ))
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -320,13 +503,32 @@ export default function App() {
                             <div className="text-[10px] text-indigo-100 mt-1 font-medium italic">Calculado para {route?.daysWorked || 0} dias úteis</div>
                           </div>
                         </div>
+
+                        {/* PDF Export Button */}
+                        <button
+                          onClick={generatePDF}
+                          disabled={isGeneratingPDF}
+                          className="w-full flex items-center justify-center gap-2 py-3 bg-white border-2 border-indigo-600 text-indigo-600 rounded-xl font-bold hover:bg-indigo-50 active:scale-95 transition-all disabled:opacity-50"
+                        >
+                          {isGeneratingPDF ? (
+                            <>
+                              <div className="w-4 h-4 border-2 border-indigo-600/30 border-t-indigo-600 rounded-full animate-spin" />
+                              Gerando Relatório...
+                            </>
+                          ) : (
+                            <>
+                              <FileText className="w-4 h-4" />
+                              Gerar Relatório Completo (PDF)
+                            </>
+                          )}
+                        </button>
                       </div>
                     )}
                   </div>
                 </div>
 
                 {/* Right: Map */}
-                <div className="w-full h-[500px] md:h-full md:flex-1 relative bg-slate-200 shrink-0">
+                <div ref={mapRef} className="w-full h-[500px] md:h-full md:flex-1 relative bg-slate-200 shrink-0">
                   <MemoizedMap 
                     origin={route?.origin || null} 
                     destination={route?.destination || null} 
